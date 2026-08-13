@@ -17,6 +17,8 @@ Ask questions over PDF documents (text, tables, and figures) using a Gradio chat
 
 **Short description:** Multimodal RAG chat over PDFs with Ollama Cloud.
 
+Figures are extracted and stored in chunk metadata, but answers use **text + tables only** because the default Cloud chat model (`gpt-oss:120b`) is text-only.
+
 The demo paper (*Attention Is All You Need*) is **downloaded automatically** on first use (not stored in Git), so Hugging Face Spaces accepts the push.
 
 ## Features

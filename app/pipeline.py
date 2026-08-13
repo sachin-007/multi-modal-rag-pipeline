@@ -145,6 +145,25 @@ def separate_content_types(chunk) -> Dict[str, Any]:
     return content_data
 
 
+def _build_text_message(prompt_text: str) -> HumanMessage:
+    """gpt-oss on Ollama Cloud is text-only — never attach image_url parts."""
+    return HumanMessage(content=prompt_text)
+
+
+def _chunk_text_and_tables(chunk: Document) -> tuple[str, List[str], int]:
+    """Return (text, tables_html, image_count) from a stored chunk."""
+    if "original_content" not in chunk.metadata:
+        return chunk.page_content, [], 0
+    try:
+        original = json.loads(chunk.metadata["original_content"])
+    except json.JSONDecodeError:
+        return chunk.page_content, [], 0
+    text = original.get("raw_text") or chunk.page_content or ""
+    tables = original.get("tables_html") or []
+    images = original.get("images_base64") or []
+    return text, tables, len(images)
+
+
 def create_ai_enhanced_summary(
     text: str, tables: List[str], images: List[str]
 ) -> str:
@@ -162,6 +181,12 @@ TEXT CONTENT:
             for i, table in enumerate(tables):
                 prompt_text += f"Table {i + 1}:\n{table}\n\n"
 
+        if images:
+            prompt_text += (
+                f"FIGURES: {len(images)} image(s) are present in this chunk "
+                "(pixels are not sent to the text model; note that figures exist).\n\n"
+            )
+
         prompt_text += """
 YOUR TASK:
 Generate a comprehensive, searchable description that covers:
@@ -169,26 +194,14 @@ Generate a comprehensive, searchable description that covers:
 1. Key facts, numbers, and data points from text and tables
 2. Main topics and concepts discussed
 3. Questions this content could answer
-4. Visual content analysis (charts, diagrams, patterns in images)
+4. Mentions of figures/diagrams when noted above
 5. Alternative search terms users might use
 
 Make it detailed and searchable - prioritize findability over brevity.
 
 SEARCHABLE DESCRIPTION:"""
 
-        message_content: List[Dict[str, Any]] = [
-            {"type": "text", "text": prompt_text}
-        ]
-        for image_base64 in images:
-            message_content.append(
-                {
-                    "type": "image_url",
-                    "image_url": {"url": f"data:image/jpeg;base64,{image_base64}"},
-                }
-            )
-
-        message = HumanMessage(content=message_content)
-        response = llm.invoke([message])
+        response = llm.invoke([_build_text_message(prompt_text)])
         return response.content
     except Exception as e:
         logger.warning("AI summary failed: %s", e)
@@ -322,48 +335,32 @@ CONTENT TO ANALYZE:
 """
         for i, chunk in enumerate(chunks):
             prompt_text += f"--- Document {i + 1} ---\n"
-            if "original_content" in chunk.metadata:
-                original_data = json.loads(chunk.metadata["original_content"])
-                raw_text = original_data.get("raw_text", "")
-                if raw_text:
-                    prompt_text += f"TEXT:\n{raw_text}\n\n"
-                tables_html = original_data.get("tables_html", [])
-                if tables_html:
-                    prompt_text += "TABLES:\n"
-                    for j, table in enumerate(tables_html):
-                        prompt_text += f"Table {j + 1}:\n{table}\n\n"
-            else:
-                prompt_text += f"TEXT:\n{chunk.page_content}\n\n"
+            raw_text, tables_html, image_count = _chunk_text_and_tables(chunk)
+            if raw_text:
+                prompt_text += f"TEXT:\n{raw_text}\n\n"
+            if tables_html:
+                prompt_text += "TABLES:\n"
+                for j, table in enumerate(tables_html):
+                    prompt_text += f"Table {j + 1}:\n{table}\n\n"
+            if image_count:
+                prompt_text += (
+                    f"[{image_count} figure(s) present in source; "
+                    "not sent to text model]\n\n"
+                )
             prompt_text += "\n"
 
         prompt_text += """
-Please provide a clear, comprehensive answer using the text, tables, and images above. If the documents don't contain sufficient information to answer the question, say "I don't have enough information to answer that question based on the provided documents."
+Please provide a clear, comprehensive answer using the text and tables above.
+If figures are noted but not shown, answer from the available text/tables only.
+If the documents don't contain sufficient information to answer the question, say "I don't have enough information to answer that question based on the provided documents."
 
 ANSWER:"""
 
-        message_content: List[Dict[str, Any]] = [
-            {"type": "text", "text": prompt_text}
-        ]
-        for chunk in chunks:
-            if "original_content" not in chunk.metadata:
-                continue
-            original_data = json.loads(chunk.metadata["original_content"])
-            for image_base64 in original_data.get("images_base64", []):
-                message_content.append(
-                    {
-                        "type": "image_url",
-                        "image_url": {
-                            "url": f"data:image/jpeg;base64,{image_base64}"
-                        },
-                    }
-                )
-
-        message = HumanMessage(content=message_content)
-        response = llm.invoke([message])
+        response = llm.invoke([_build_text_message(prompt_text)])
         return response.content
     except Exception as e:
-        logger.error("Answer generation failed: %s", e)
-        return "Sorry, I encountered an error while generating the answer."
+        logger.exception("Answer generation failed: %s", e)
+        return f"Answer generation failed: {e}"
 
 
 def ask_question(question: str) -> Dict[str, Any]:
