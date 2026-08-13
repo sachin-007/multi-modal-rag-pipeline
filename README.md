@@ -29,10 +29,11 @@ The demo paper (*Attention Is All You Need*) is **downloaded automatically** on 
 
 ## Space setup
 
-1. Create a **Gradio** Space (CPU basic)
+1. Create a **Gradio** Space — **CPU basic** is enough (LLM runs on Ollama Cloud).
+   If you use **ZeroGPU**, handlers are already decorated with `@spaces.GPU`.
 2. Add secret: `OLLAMA_API_KEY`
 3. Optional variables:
-   - `GRADIO_SSR_MODE=False` (recommended on free CPU Spaces)
+   - `GRADIO_SSR_MODE=False` (recommended)
    - `OPENAI_BASE_URL=https://ollama.com/v1`
    - `LLM_MODEL=gpt-oss:120b`
    - `EMBED_MODEL=nomic-embed-text`

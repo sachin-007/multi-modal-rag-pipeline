@@ -8,10 +8,26 @@ import shutil
 from pathlib import Path
 from typing import Any, List, Optional, Union
 
-# HF Spaces enables Gradio SSR by default; disable for stable CPU Spaces.
+# Avoid CUDA init in the parent process (ZeroGPU / numba).
+os.environ.setdefault("NUMBA_DISABLE_CUDA", "1")
+# HF Spaces enables Gradio SSR by default; disable for stable Spaces.
 os.environ.setdefault("GRADIO_SSR_MODE", "False")
 
 import gradio as gr
+
+try:
+    import spaces
+except ImportError:  # local runs without the HF spaces package
+    class spaces:  # type: ignore[no-redef]
+        @staticmethod
+        def GPU(*dargs, **dkwargs):
+            if dargs and callable(dargs[0]) and not dkwargs:
+                return dargs[0]
+
+            def _wrap(fn):
+                return fn
+
+            return _wrap
 
 from app import config, pipeline
 
@@ -43,6 +59,8 @@ def _resolve_upload_path(file_obj: Any) -> Optional[Path]:
     return None
 
 
+# ZeroGPU scans Gradio-bound handlers for @spaces.GPU at startup.
+@spaces.GPU(duration=120)
 def ingest_demo() -> str:
     if not config.OLLAMA_API_KEY:
         return "Error: set OLLAMA_API_KEY as a Space secret (or in local .env)."
@@ -58,6 +76,7 @@ def ingest_demo() -> str:
         return f"Ingest failed: {e}"
 
 
+@spaces.GPU(duration=120)
 def ingest_upload(file_obj: Any) -> str:
     if file_obj is None:
         return "Please upload a PDF."
@@ -81,6 +100,7 @@ def ingest_upload(file_obj: Any) -> str:
         return f"Ingest failed: {e}"
 
 
+@spaces.GPU(duration=60)
 def chat(
     message: str, history: Optional[List[dict]]
 ) -> Union[List[dict], tuple]:
