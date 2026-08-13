@@ -2,9 +2,14 @@
 
 from __future__ import annotations
 
+import inspect
+import os
 import shutil
 from pathlib import Path
 from typing import Any, List, Optional, Union
+
+# HF Spaces enables Gradio SSR by default; disable for stable CPU Spaces.
+os.environ.setdefault("GRADIO_SSR_MODE", "False")
 
 import gradio as gr
 
@@ -158,5 +163,19 @@ Powered by **Ollama Cloud** + ChromaDB.
     )
 
 
+def _launch_demo() -> None:
+    kwargs = {
+        "server_name": "0.0.0.0",
+        "server_port": 7860,
+    }
+    params = inspect.signature(demo.launch).parameters
+    # Gradio 5 uses ssr_mode; some builds mentioned ssr= in messages.
+    if "ssr_mode" in params:
+        kwargs["ssr_mode"] = False
+    elif "ssr" in params:
+        kwargs["ssr"] = False
+    demo.launch(**kwargs)
+
+
 if __name__ == "__main__":
-    demo.launch(server_name="0.0.0.0", server_port=7860, ssr=False)
+    _launch_demo()

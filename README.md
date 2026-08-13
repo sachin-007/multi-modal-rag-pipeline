@@ -31,7 +31,11 @@ The demo paper (*Attention Is All You Need*) is **downloaded automatically** on 
 
 1. Create a **Gradio** Space (CPU basic)
 2. Add secret: `OLLAMA_API_KEY`
-3. Optional variables: `OPENAI_BASE_URL=https://ollama.com/v1`, `LLM_MODEL=gpt-oss:120b`, `EMBED_MODEL=nomic-embed-text`
+3. Optional variables:
+   - `GRADIO_SSR_MODE=False` (recommended on free CPU Spaces)
+   - `OPENAI_BASE_URL=https://ollama.com/v1`
+   - `LLM_MODEL=gpt-oss:120b`
+   - `EMBED_MODEL=nomic-embed-text`
 4. Push this repo to the Space
 
 ## Local run
