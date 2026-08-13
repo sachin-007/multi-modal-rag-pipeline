@@ -28,7 +28,18 @@ UPLOAD_DIR = Path(os.getenv("UPLOAD_DIR", str(DATA_DIR / "uploads")))
 OLLAMA_API_KEY = os.getenv("OLLAMA_API_KEY") or os.getenv("OPENAI_API_KEY") or ""
 OLLAMA_BASE_URL = os.getenv("OPENAI_BASE_URL", "https://ollama.com/v1")
 LLM_MODEL = os.getenv("LLM_MODEL", "gpt-oss:120b")
-EMBED_MODEL = os.getenv("EMBED_MODEL", "nomic-embed-text")
+# Ollama Cloud has chat models only — no /v1/embeddings. Default to local ST.
+EMBED_BACKEND = os.getenv("EMBED_BACKEND", "local").strip().lower()
+_DEFAULT_LOCAL_EMBED = "sentence-transformers/all-MiniLM-L6-v2"
+_DEFAULT_OLLAMA_EMBED = "nomic-embed-text"
+_embed_model_env = (os.getenv("EMBED_MODEL") or "").strip()
+if EMBED_BACKEND == "ollama":
+    EMBED_MODEL = _embed_model_env or _DEFAULT_OLLAMA_EMBED
+elif _embed_model_env in {"", _DEFAULT_OLLAMA_EMBED, f"{_DEFAULT_OLLAMA_EMBED}:latest"}:
+    # Ignore leftover Cloud-era EMBED_MODEL secrets that are not HF model ids.
+    EMBED_MODEL = _DEFAULT_LOCAL_EMBED
+else:
+    EMBED_MODEL = _embed_model_env
 
 RETRIEVAL_K = int(os.getenv("RETRIEVAL_K", "3"))
 PARTITION_STRATEGY = os.getenv("PARTITION_STRATEGY", "hi_res")

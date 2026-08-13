@@ -10,6 +10,7 @@ from typing import Any, Callable, Dict, List, Optional
 
 from langchain_chroma import Chroma
 from langchain_core.documents import Document
+from langchain_core.embeddings import Embeddings
 from langchain_core.messages import HumanMessage
 from langchain_openai import ChatOpenAI, OpenAIEmbeddings
 from unstructured.chunking.title import chunk_by_title
@@ -23,6 +24,7 @@ ProgressCallback = Optional[Callable[[str, str, float], None]]
 
 _vectorstore: Optional[Chroma] = None
 _document_name: Optional[str] = None
+_embeddings: Optional[Embeddings] = None
 
 
 def get_llm() -> ChatOpenAI:
@@ -34,12 +36,29 @@ def get_llm() -> ChatOpenAI:
     )
 
 
-def get_embeddings() -> OpenAIEmbeddings:
-    return OpenAIEmbeddings(
-        model=config.EMBED_MODEL,
-        base_url=config.OLLAMA_BASE_URL,
-        api_key=config.require_api_key(),
+def get_embeddings() -> Embeddings:
+    """Local sentence-transformers by default; Ollama only if EMBED_BACKEND=ollama."""
+    global _embeddings
+    if _embeddings is not None:
+        return _embeddings
+
+    if config.EMBED_BACKEND == "ollama":
+        _embeddings = OpenAIEmbeddings(
+            model=config.EMBED_MODEL,
+            base_url=config.OLLAMA_BASE_URL,
+            api_key=config.require_api_key(),
+        )
+        return _embeddings
+
+    from langchain_huggingface import HuggingFaceEmbeddings
+
+    logger.info("Loading local embeddings: %s", config.EMBED_MODEL)
+    _embeddings = HuggingFaceEmbeddings(
+        model_name=config.EMBED_MODEL,
+        model_kwargs={"device": "cpu"},
+        encode_kwargs={"normalize_embeddings": True},
     )
+    return _embeddings
 
 
 def chroma_is_ready() -> bool:

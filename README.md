@@ -13,7 +13,7 @@ short_description: Multimodal RAG chat over PDFs with Ollama Cloud
 
 # ModalRAG — Multimodal RAG (Gradio)
 
-Ask questions over PDF documents (text, tables, and figures) using a Gradio chat UI, ChromaDB, and **Ollama Cloud** for the LLM and embeddings.
+Ask questions over PDF documents (text, tables, and figures) using a Gradio chat UI, ChromaDB, **Ollama Cloud** for the LLM, and **local sentence-transformers** for embeddings (Ollama Cloud has no embeddings API).
 
 **Short description:** Multimodal RAG chat over PDFs with Ollama Cloud.
 
@@ -36,8 +36,11 @@ The demo paper (*Attention Is All You Need*) is **downloaded automatically** on 
    - `GRADIO_SSR_MODE=False` (recommended)
    - `OPENAI_BASE_URL=https://ollama.com/v1`
    - `LLM_MODEL=gpt-oss:120b`
-   - `EMBED_MODEL=nomic-embed-text`
+   - `EMBED_BACKEND=local` (default; required on Ollama Cloud)
+   - `EMBED_MODEL=sentence-transformers/all-MiniLM-L6-v2`
 4. Push this repo to the Space
+
+**Note:** Delete Space secret `EMBED_MODEL=nomic-embed-text` if you set that earlier — Cloud cannot embed with it.
 
 ## Local run
 
