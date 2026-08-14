@@ -1,0 +1,82 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>ModalRAG</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=DM+Sans:ital,opsz,wght@0,9..40,400;0,9..40,500;0,9..40,600;0,9..40,700;1,9..40,400&family=Fraunces:opsz,wght@9..144,500;9..144,600;9..144,700&display=swap"
+      rel="stylesheet"
+    />
+    <link rel="stylesheet" href="/static/styles.css" />
+  </head>
+  <body>
+    <div class="grain" aria-hidden="true"></div>
+    <div class="shell">
+      <aside class="rail" aria-label="Document controls">
+        <div class="brand-block">
+          <p class="brand">ModalRAG</p>
+          <p class="brand-tag">Ask PDFs with text, tables, and figures.</p>
+        </div>
+
+        <section class="panel">
+          <h2 class="panel-title">Document</h2>
+          <div class="status-row">
+            <span class="status-dot" id="statusDot" data-state="idle"></span>
+            <div>
+              <p class="status-label" id="statusLabel">Idle</p>
+              <p class="status-message" id="statusMessage">No document indexed yet</p>
+            </div>
+          </div>
+          <div class="progress-track" aria-hidden="true">
+            <div class="progress-fill" id="progressFill"></div>
+          </div>
+          <p class="doc-name" id="docName">—</p>
+          <button type="button" class="btn btn-primary" id="demoBtn">
+            Use demo PDF
+          </button>
+        </section>
+
+        <section class="panel">
+          <h2 class="panel-title">Upload</h2>
+          <label class="dropzone" id="dropzone" for="fileInput">
+            <input type="file" id="fileInput" accept="application/pdf,.pdf" hidden />
+            <span class="dropzone-title">Drop a PDF here</span>
+            <span class="dropzone-hint">or click to browse</span>
+          </label>
+        </section>
+      </aside>
+
+      <main class="stage">
+        <header class="stage-hero">
+          <h1 class="hero-brand">ModalRAG</h1>
+          <p class="hero-line">
+            Multimodal retrieval over research PDFs — grounded answers from the pages you index.
+          </p>
+        </header>
+
+        <div class="chat" id="chat" role="log" aria-live="polite"></div>
+
+        <div class="composer">
+          <div class="examples" id="examples" aria-label="Example questions"></div>
+          <form class="composer-form" id="askForm">
+            <label class="sr-only" for="questionInput">Your question</label>
+            <textarea
+              id="questionInput"
+              name="question"
+              rows="2"
+              placeholder="Ask about the indexed document…"
+              required
+            ></textarea>
+            <button type="submit" class="btn btn-send" id="sendBtn" aria-label="Send">
+              <span>Ask</span>
+            </button>
+          </form>
+        </div>
+      </main>
+    </div>
+    <script src="/static/app.js"></script>
+  </body>
+</html>

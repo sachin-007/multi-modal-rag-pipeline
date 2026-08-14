@@ -1,0 +1,5 @@
+poppler-utils
+tesseract-ocr
+libmagic1
+libgl1
+libglib2.0-0

@@ -1,0 +1,36 @@
+# Byte-compiled / cache files
+__pycache__/
+*.py[cod]
+*.pyo
+
+# Virtual environment
+venv/
+ENV/
+.venv/
+env/
+env.bak/
+
+# Distribution / packaging
+*.egg-info/
+dist/
+build/
+
+# Logs
+*.log
+
+# Secrets and local runtime data
+.env
+data/chroma_db/
+data/uploads/
+dbv1/
+dbv2/
+_extract_funcs.py
+
+# Large binaries — downloaded at runtime for HF Spaces
+docs/*.pdf
+
+# OS / IDE files
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
