@@ -22,6 +22,8 @@ build/
 .env
 data/chroma_db/
 data/uploads/
+data/bm25_docs.pkl
+data/indexed_documents.json
 dbv1/
 dbv2/
 _extract_funcs.py

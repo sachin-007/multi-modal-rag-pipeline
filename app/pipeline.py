@@ -1,12 +1,14 @@
-"""Multimodal RAG pipeline extracted from multi_modal_rag.ipynb."""
+"""Multimodal RAG pipeline with hybrid retrieval (BM25 + vector + RRF + rerank)."""
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
+import pickle
 import shutil
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional, Set
 
 from langchain_chroma import Chroma
 from langchain_core.documents import Document
@@ -17,14 +19,17 @@ from unstructured.chunking.title import chunk_by_title
 from unstructured.partition.pdf import partition_pdf
 
 from app import config
+from app.retrieval import format_trace_markdown, retrieve_with_trace
 
 logger = logging.getLogger(__name__)
 
 ProgressCallback = Optional[Callable[[str, str, float], None]]
 
 _vectorstore: Optional[Chroma] = None
-_document_name: Optional[str] = None
+_document_names: Set[str] = set()
 _embeddings: Optional[Embeddings] = None
+_bm25_docs: List[Document] = []
+_bm25_retriever = None
 
 
 def get_llm() -> ChatOpenAI:
@@ -69,7 +74,99 @@ def chroma_is_ready() -> bool:
 
 
 def get_document_name() -> Optional[str]:
-    return _document_name
+    names = get_indexed_document_names()
+    if not names:
+        return None
+    return ", ".join(names)
+
+
+def get_indexed_document_names() -> List[str]:
+    _load_doc_index()
+    return sorted(_document_names)
+
+
+def _load_doc_index() -> None:
+    global _document_names
+    path = config.DOC_INDEX_PATH
+    if path.exists():
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+            _document_names = set(data.get("documents") or [])
+        except Exception as e:
+            logger.warning("Failed to load doc index: %s", e)
+
+
+def _save_doc_index() -> None:
+    config.ensure_dirs()
+    config.DOC_INDEX_PATH.write_text(
+        json.dumps({"documents": sorted(_document_names)}, indent=2),
+        encoding="utf-8",
+    )
+
+
+def _make_chunk_id(document_name: str, raw_text: str) -> str:
+    digest = hashlib.sha256(
+        f"{document_name}\n{raw_text}".encode("utf-8", errors="ignore")
+    ).hexdigest()
+    return digest[:24]
+
+
+def _bm25_text(raw_text: str, tables: List[str]) -> str:
+    parts = [raw_text or ""]
+    for table in tables or []:
+        parts.append(table or "")
+    return "\n\n".join(p for p in parts if p).strip()
+
+
+def _load_bm25_docs() -> None:
+    global _bm25_docs, _bm25_retriever
+    path = config.BM25_PATH
+    if not path.exists():
+        _bm25_docs = []
+        _bm25_retriever = None
+        return
+    try:
+        with path.open("rb") as f:
+            _bm25_docs = pickle.load(f)
+        _rebuild_bm25_retriever()
+    except Exception as e:
+        logger.warning("Failed to load BM25 corpus: %s", e)
+        _bm25_docs = []
+        _bm25_retriever = None
+
+
+def _save_bm25_docs() -> None:
+    config.ensure_dirs()
+    with config.BM25_PATH.open("wb") as f:
+        pickle.dump(_bm25_docs, f)
+
+
+def _rebuild_bm25_retriever() -> None:
+    global _bm25_retriever
+    if not _bm25_docs:
+        _bm25_retriever = None
+        return
+    from langchain_community.retrievers import BM25Retriever
+
+    # BM25 over raw text + tables stored on each doc as page_content for the retriever
+    search_docs = []
+    for doc in _bm25_docs:
+        search_docs.append(
+            Document(
+                page_content=doc.metadata.get("bm25_text") or doc.page_content,
+                metadata=doc.metadata,
+            )
+        )
+    retriever = BM25Retriever.from_documents(search_docs)
+    retriever.k = config.BM25_K
+    _bm25_retriever = retriever
+
+
+def get_bm25_retriever():
+    global _bm25_retriever
+    if _bm25_retriever is None and config.BM25_PATH.exists():
+        _load_bm25_docs()
+    return _bm25_retriever
 
 
 def load_vectorstore() -> Optional[Chroma]:
@@ -83,12 +180,60 @@ def load_vectorstore() -> Optional[Chroma]:
         embedding_function=get_embeddings(),
         collection_metadata={"hnsw:space": "cosine"},
     )
+    _load_bm25_docs()
+    _load_doc_index()
     return _vectorstore
 
 
 def reset_vectorstore_cache() -> None:
-    global _vectorstore
+    global _vectorstore, _bm25_retriever
     _vectorstore = None
+    _bm25_retriever = None
+
+
+def clear_index() -> None:
+    """Wipe Chroma + BM25 corpus + document index."""
+    global _vectorstore, _bm25_docs, _bm25_retriever, _document_names
+    reset_vectorstore_cache()
+    persist = Path(config.CHROMA_DIR)
+    if persist.exists():
+        shutil.rmtree(persist, ignore_errors=True)
+    persist.mkdir(parents=True, exist_ok=True)
+    if config.BM25_PATH.exists():
+        config.BM25_PATH.unlink()
+    if config.DOC_INDEX_PATH.exists():
+        config.DOC_INDEX_PATH.unlink()
+    _bm25_docs = []
+    _bm25_retriever = None
+    _document_names = set()
+    _vectorstore = None
+
+
+def _delete_document_from_stores(document_name: str) -> None:
+    """Remove existing chunks for document_name from Chroma and BM25 (replace-on-reingest)."""
+    global _bm25_docs, _vectorstore
+    vs = load_vectorstore()
+    if vs is not None:
+        try:
+            data = vs.get(where={"document_name": document_name})
+            ids = data.get("ids") or []
+            if ids:
+                vs.delete(ids=ids)
+                logger.info(
+                    "Removed %s existing Chroma chunks for %s",
+                    len(ids),
+                    document_name,
+                )
+        except Exception as e:
+            logger.warning("Chroma delete for %s failed: %s", document_name, e)
+
+    before = len(_bm25_docs)
+    _bm25_docs = [
+        d for d in _bm25_docs if d.metadata.get("document_name") != document_name
+    ]
+    if len(_bm25_docs) != before:
+        _save_bm25_docs()
+        _rebuild_bm25_retriever()
 
 
 def partition_document(file_path: str, on_progress: ProgressCallback = None):
@@ -213,7 +358,11 @@ SEARCHABLE DESCRIPTION:"""
         return summary
 
 
-def summarise_chunks(chunks, on_progress: ProgressCallback = None) -> List[Document]:
+def summarise_chunks(
+    chunks,
+    document_name: str,
+    on_progress: ProgressCallback = None,
+) -> List[Document]:
     langchain_documents: List[Document] = []
     total = len(chunks) or 1
 
@@ -236,16 +385,25 @@ def summarise_chunks(chunks, on_progress: ProgressCallback = None) -> List[Docum
         else:
             enhanced_content = content_data["text"]
 
+        raw_text = content_data["text"] or ""
+        tables = content_data["tables"] or []
+        chunk_id = _make_chunk_id(document_name, raw_text)
+        bm25_body = _bm25_text(raw_text, tables)
+
         doc = Document(
             page_content=enhanced_content,
             metadata={
+                "document_name": document_name,
+                "source": document_name,
+                "chunk_id": chunk_id,
+                "bm25_text": bm25_body,
                 "original_content": json.dumps(
                     {
-                        "raw_text": content_data["text"],
-                        "tables_html": content_data["tables"],
+                        "raw_text": raw_text,
+                        "tables_html": tables,
                         "images_base64": content_data["images"],
                     }
-                )
+                ),
             },
         )
         langchain_documents.append(doc)
@@ -253,30 +411,40 @@ def summarise_chunks(chunks, on_progress: ProgressCallback = None) -> List[Docum
     return langchain_documents
 
 
-def create_vector_store(
-    documents: List[Document],
-    persist_directory: Optional[str] = None,
-    on_progress: ProgressCallback = None,
-) -> Chroma:
+def _ensure_vectorstore() -> Chroma:
     global _vectorstore
-
-    persist = Path(persist_directory or config.CHROMA_DIR)
-    if on_progress:
-        on_progress("embedding", "Creating embeddings and vector store", 0.85)
-
-    if persist.exists():
-        shutil.rmtree(persist, ignore_errors=True)
-    persist.mkdir(parents=True, exist_ok=True)
-
-    embedding_model = get_embeddings()
-    vectorstore = Chroma.from_documents(
-        documents=documents,
-        embedding=embedding_model,
-        persist_directory=str(persist),
+    vs = load_vectorstore()
+    if vs is not None:
+        return vs
+    config.ensure_dirs()
+    Path(config.CHROMA_DIR).mkdir(parents=True, exist_ok=True)
+    _vectorstore = Chroma(
+        persist_directory=str(config.CHROMA_DIR),
+        embedding_function=get_embeddings(),
         collection_metadata={"hnsw:space": "cosine"},
     )
-    _vectorstore = vectorstore
-    return vectorstore
+    return _vectorstore
+
+
+def append_documents_to_stores(
+    documents: List[Document],
+    on_progress: ProgressCallback = None,
+) -> Chroma:
+    """Append chunks to Chroma + BM25 without wiping the whole index."""
+    global _bm25_docs
+
+    if on_progress:
+        on_progress("embedding", "Creating embeddings and updating stores", 0.85)
+
+    vs = _ensure_vectorstore()
+    ids = [d.metadata["chunk_id"] for d in documents]
+    vs.add_documents(documents=documents, ids=ids)
+
+    for doc in documents:
+        _bm25_docs.append(doc)
+    _save_bm25_docs()
+    _rebuild_bm25_retriever()
+    return vs
 
 
 def run_ingestion(
@@ -284,21 +452,31 @@ def run_ingestion(
     document_name: Optional[str] = None,
     on_progress: ProgressCallback = None,
 ) -> Chroma:
-    global _document_name
+    global _document_names
 
     path = Path(pdf_path)
     if not path.exists():
         raise FileNotFoundError(f"PDF not found: {pdf_path}")
 
     config.ensure_dirs()
+    _load_bm25_docs()
+    _load_doc_index()
+
+    name = document_name or path.name
+    # Replace-on-reingest for the same PDF name
+    if name in _document_names or chroma_is_ready():
+        _delete_document_from_stores(name)
+
     elements = partition_document(str(path), on_progress=on_progress)
     chunks = create_chunks_by_title(elements, on_progress=on_progress)
-    summarised = summarise_chunks(chunks, on_progress=on_progress)
-    db = create_vector_store(summarised, on_progress=on_progress)
+    summarised = summarise_chunks(chunks, document_name=name, on_progress=on_progress)
+    db = append_documents_to_stores(summarised, on_progress=on_progress)
 
-    _document_name = document_name or path.name
+    _document_names.add(name)
+    _save_doc_index()
+
     if on_progress:
-        on_progress("ready", f"Indexed {_document_name}", 1.0)
+        on_progress("ready", f"Indexed {get_document_name()}", 1.0)
     return db
 
 
@@ -306,6 +484,7 @@ def _source_preview(chunk: Document, index: int) -> Dict[str, Any]:
     preview = chunk.page_content[:280].replace("\n", " ").strip()
     has_tables = False
     has_images = False
+    document_name = chunk.metadata.get("document_name") or ""
     if "original_content" in chunk.metadata:
         try:
             original = json.loads(chunk.metadata["original_content"])
@@ -323,6 +502,8 @@ def _source_preview(chunk: Document, index: int) -> Dict[str, Any]:
         "preview": preview,
         "has_tables": has_tables,
         "has_images": has_images,
+        "document_name": document_name,
+        "chunk_id": chunk.metadata.get("chunk_id") or "",
     }
 
 
@@ -333,15 +514,20 @@ def generate_final_answer(chunks: List[Document], query: str) -> str:
 
 CONTENT TO ANALYZE:
 """
+        max_table = config.TABLE_PROMPT_MAX_CHARS
         for i, chunk in enumerate(chunks):
-            prompt_text += f"--- Document {i + 1} ---\n"
+            doc_name = chunk.metadata.get("document_name") or "unknown"
+            prompt_text += f"--- Document {i + 1} ({doc_name}) ---\n"
             raw_text, tables_html, image_count = _chunk_text_and_tables(chunk)
             if raw_text:
                 prompt_text += f"TEXT:\n{raw_text}\n\n"
             if tables_html:
                 prompt_text += "TABLES:\n"
                 for j, table in enumerate(tables_html):
-                    prompt_text += f"Table {j + 1}:\n{table}\n\n"
+                    clipped = table
+                    if len(clipped) > max_table:
+                        clipped = clipped[:max_table] + "\n…[table truncated]"
+                    prompt_text += f"Table {j + 1}:\n{clipped}\n\n"
             if image_count:
                 prompt_text += (
                     f"[{image_count} figure(s) present in source; "
@@ -370,8 +556,31 @@ def ask_question(question: str) -> Dict[str, Any]:
             "No document is indexed yet. Ingest the demo PDF or upload a file first."
         )
 
-    retriever = db.as_retriever(search_kwargs={"k": config.RETRIEVAL_K})
-    chunks = retriever.invoke(question)
+    bm25 = get_bm25_retriever()
+    chunks, trace = retrieve_with_trace(
+        question,
+        vectorstore=db,
+        bm25_retriever=bm25,
+        llm=get_llm(),
+    )
+
+    if not chunks:
+        answer = (
+            "I don't have enough information to answer that question based on "
+            "the provided documents."
+        )
+        return {
+            "answer": answer,
+            "sources": [],
+            "trace": trace,
+            "trace_markdown": format_trace_markdown(trace),
+        }
+
     answer = generate_final_answer(chunks, question)
     sources = [_source_preview(chunk, i + 1) for i, chunk in enumerate(chunks)]
-    return {"answer": answer, "sources": sources}
+    return {
+        "answer": answer,
+        "sources": sources,
+        "trace": trace,
+        "trace_markdown": format_trace_markdown(trace),
+    }

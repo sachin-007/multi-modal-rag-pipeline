@@ -41,8 +41,36 @@ elif _embed_model_env in {"", _DEFAULT_OLLAMA_EMBED, f"{_DEFAULT_OLLAMA_EMBED}:l
 else:
     EMBED_MODEL = _embed_model_env
 
-RETRIEVAL_K = int(os.getenv("RETRIEVAL_K", "3"))
+RETRIEVAL_K = int(os.getenv("RETRIEVAL_K", "5"))
 PARTITION_STRATEGY = os.getenv("PARTITION_STRATEGY", "hi_res")
+
+# Hybrid retrieval: multi-query + BM25 + vector + RRF + rerank
+MULTI_QUERY_N = int(os.getenv("MULTI_QUERY_N", "3"))
+BM25_K = int(os.getenv("BM25_K", "10"))
+VECTOR_K = int(os.getenv("VECTOR_K", "10"))
+RRF_K = int(os.getenv("RRF_K", "60"))
+RRF_TOP_N = int(os.getenv("RRF_TOP_N", "30"))
+BM25_PATH = Path(os.getenv("BM25_PATH", str(DATA_DIR / "bm25_docs.pkl")))
+DOC_INDEX_PATH = Path(
+    os.getenv("DOC_INDEX_PATH", str(DATA_DIR / "indexed_documents.json"))
+)
+
+RERANK_BACKEND = os.getenv("RERANK_BACKEND", "cohere").strip().lower()
+RERANK_MODEL = os.getenv(
+    "RERANK_MODEL",
+    "rerank-english-v3.0"
+    if RERANK_BACKEND == "cohere"
+    else "BAAI/bge-reranker-base",
+).strip()
+RERANK_TOP_N = int(os.getenv("RERANK_TOP_N", str(RETRIEVAL_K or 5)))
+RERANK_API_KEY = (
+    os.getenv("RERANK_API_KEY") or os.getenv("COHERE_API_KEY") or ""
+).strip()
+RERANK_FALLBACK_BACKEND = os.getenv("RERANK_FALLBACK_BACKEND", "local").strip().lower()
+RERANK_FALLBACK_MODEL = os.getenv(
+    "RERANK_FALLBACK_MODEL", "BAAI/bge-reranker-base"
+).strip()
+TABLE_PROMPT_MAX_CHARS = int(os.getenv("TABLE_PROMPT_MAX_CHARS", "4000"))
 
 
 def require_api_key() -> str:
@@ -59,6 +87,8 @@ def ensure_dirs() -> None:
     CHROMA_DIR.mkdir(parents=True, exist_ok=True)
     UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
     DOCS_DIR.mkdir(parents=True, exist_ok=True)
+    BM25_PATH.parent.mkdir(parents=True, exist_ok=True)
+    DOC_INDEX_PATH.parent.mkdir(parents=True, exist_ok=True)
 
 
 def ensure_demo_pdf() -> Path:

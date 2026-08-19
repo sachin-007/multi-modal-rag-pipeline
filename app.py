@@ -1,12 +1,13 @@
-"""ModalRAG — Gradio UI for Hugging Face Spaces."""
+"""ModalRAG — Gradio UI for Hugging Face Spaces (hybrid RAG + retrieval log)."""
 
 from __future__ import annotations
 
 import inspect
 import os
 import shutil
+from datetime import datetime
 from pathlib import Path
-from typing import Any, List, Optional, Union
+from typing import Any, List, Optional, Tuple, Union
 
 # Avoid CUDA init in the parent process (ZeroGPU / numba).
 os.environ.setdefault("NUMBA_DISABLE_CUDA", "1")
@@ -41,7 +42,7 @@ EXAMPLE_QUESTIONS = [
 
 def _status_ready() -> str:
     if pipeline.chroma_is_ready():
-        name = pipeline.get_document_name() or "indexed PDF"
+        name = pipeline.get_document_name() or "indexed PDF(s)"
         return f"Ready — {name}"
     return "No document indexed yet. Use demo PDF or upload one."
 
@@ -59,7 +60,6 @@ def _resolve_upload_path(file_obj: Any) -> Optional[Path]:
     return None
 
 
-# ZeroGPU scans Gradio-bound handlers for @spaces.GPU at startup.
 @spaces.GPU(duration=120)
 def ingest_demo() -> str:
     if not config.OLLAMA_API_KEY:
@@ -100,13 +100,24 @@ def ingest_upload(file_obj: Any) -> str:
         return f"Ingest failed: {e}"
 
 
-@spaces.GPU(duration=60)
+def clear_index() -> str:
+    try:
+        pipeline.clear_index()
+        return "Index cleared. Upload or use demo PDF to start again."
+    except Exception as e:
+        return f"Clear failed: {e}"
+
+
+@spaces.GPU(duration=120)
 def chat(
-    message: str, history: Optional[List[dict]]
-) -> Union[List[dict], tuple]:
+    message: str,
+    history: Optional[List[dict]],
+    log_md: Optional[str],
+) -> Tuple[Union[List[dict], list], str]:
     history = list(history or [])
+    log_md = log_md or ""
     if not message or not str(message).strip():
-        return history
+        return history, log_md
 
     user_text = str(message).strip()
     if not config.OLLAMA_API_KEY:
@@ -117,35 +128,48 @@ def chat(
                 "content": "OLLAMA_API_KEY is not configured on the server.",
             }
         )
-        return history
+        return history, log_md
 
+    trace_md = ""
     try:
         result = pipeline.ask_question(user_text)
         sources = result.get("sources") or []
         answer = result.get("answer") or ""
         if sources:
-            lines = [
-                f"- Chunk {s['index']}: {s['preview']}" for s in sources
-            ]
+            lines = []
+            for s in sources:
+                doc = s.get("document_name") or "?"
+                lines.append(f"- [{doc}] Chunk {s['index']}: {s['preview']}")
             answer = f"{answer}\n\n**Sources**\n" + "\n".join(lines)
+        stamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        trace_md = f"### Ask @ {stamp}\n\n" + (
+            result.get("trace_markdown") or ""
+        )
     except Exception as e:
         answer = f"Error: {e}"
+        stamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        trace_md = f"### Ask @ {stamp}\n\n**Error:** `{e}`\n\n---\n"
 
     history.append({"role": "user", "content": user_text})
     history.append({"role": "assistant", "content": answer})
-    return history
+    new_log = (log_md + "\n" + trace_md).strip() + "\n"
+    return history, new_log
 
 
 def clear_question() -> str:
     return ""
 
 
+def clear_log() -> str:
+    return "_Retrieval log cleared. Ask a question to see multi-query, BM25, vector, RRF, and rerank steps._\n"
+
+
 with gr.Blocks(title="ModalRAG") as demo:
     gr.Markdown(
         """
 # ModalRAG
-Multimodal RAG chat over PDFs — grounded answers from text, tables, and figures.
-Powered by **Ollama Cloud** + ChromaDB.
+Multimodal RAG over PDFs — **hybrid retrieval** (multi-query + BM25 + vector + RRF + rerank).
+LLM: **Ollama Cloud** · Embeddings: local · Rerank: Cohere with local BGE fallback.
         """
     )
     status = gr.Textbox(
@@ -161,26 +185,44 @@ Powered by **Ollama Cloud** + ChromaDB.
             file_types=[".pdf"],
             type="filepath",
         )
+        clear_btn = gr.Button("Clear index", variant="stop")
 
     demo_btn.click(ingest_demo, outputs=status)
     upload.upload(ingest_upload, inputs=upload, outputs=status)
+    clear_btn.click(clear_index, outputs=status)
 
-    chatbot = gr.Chatbot(label="Chat", height=440, type="messages")
-    question = gr.Textbox(
-        label="Question",
-        placeholder="Ask about the indexed document…",
-        lines=2,
-    )
-    ask_btn = gr.Button("Ask", variant="primary")
+    with gr.Tabs():
+        with gr.Tab("Chat"):
+            chatbot = gr.Chatbot(label="Chat", height=440, type="messages")
+            question = gr.Textbox(
+                label="Question",
+                placeholder="Ask about the indexed document(s)…",
+                lines=2,
+            )
+            ask_btn = gr.Button("Ask", variant="primary")
+            gr.Examples(examples=EXAMPLE_QUESTIONS, inputs=question)
 
-    gr.Examples(examples=EXAMPLE_QUESTIONS, inputs=question)
+        with gr.Tab("Retrieval log"):
+            retrieval_log = gr.Markdown(
+                value=(
+                    "_Ask a question in the Chat tab. This log shows multi-query "
+                    "variations, BM25 vs vector hits, RRF fusion, and rerank "
+                    "(including Cohere → local fallback)._"
+                ),
+            )
+            clear_log_btn = gr.Button("Clear log")
+            clear_log_btn.click(clear_log, outputs=retrieval_log)
 
-    ask_btn.click(chat, inputs=[question, chatbot], outputs=chatbot).then(
-        clear_question, outputs=question
-    )
-    question.submit(chat, inputs=[question, chatbot], outputs=chatbot).then(
-        clear_question, outputs=question
-    )
+    ask_btn.click(
+        chat,
+        inputs=[question, chatbot, retrieval_log],
+        outputs=[chatbot, retrieval_log],
+    ).then(clear_question, outputs=question)
+    question.submit(
+        chat,
+        inputs=[question, chatbot, retrieval_log],
+        outputs=[chatbot, retrieval_log],
+    ).then(clear_question, outputs=question)
 
 
 def _launch_demo() -> None:
@@ -189,7 +231,6 @@ def _launch_demo() -> None:
         "server_port": 7860,
     }
     params = inspect.signature(demo.launch).parameters
-    # Gradio 5 uses ssr_mode; some builds mentioned ssr= in messages.
     if "ssr_mode" in params:
         kwargs["ssr_mode"] = False
     elif "ssr" in params:

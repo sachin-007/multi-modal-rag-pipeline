@@ -16,11 +16,14 @@ class SourceItem(BaseModel):
     preview: str
     has_tables: bool = False
     has_images: bool = False
+    document_name: str = ""
+    chunk_id: str = ""
 
 
 class AskResponse(BaseModel):
     answer: str
     sources: List[SourceItem] = []
+    trace: Optional[dict] = None
 
 
 class HealthResponse(BaseModel):

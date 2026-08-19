@@ -256,6 +256,7 @@ def ask(body: AskRequest) -> AskResponse:
     return AskResponse(
         answer=result["answer"],
         sources=[SourceItem(**s) for s in result["sources"]],
+        trace=result.get("trace"),
     )
 
 
