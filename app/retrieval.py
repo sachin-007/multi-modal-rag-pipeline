@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import json
 import logging
+import re
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from collections import defaultdict
@@ -16,6 +18,10 @@ from app import config
 logger = logging.getLogger(__name__)
 
 _local_reranker = None
+
+_QUERY_LINE_RE = re.compile(
+    r"^\s*(?:[-*]|\d+[.)]|#{1,6})?\s*(?:\*{1,2}|_{1,2})?(.+?)(?:\*{1,2}|_{1,2})?\s*$"
+)
 
 
 class QueryVariations(BaseModel):
@@ -36,8 +42,6 @@ def _chunk_id(doc: Document) -> str:
 def _hit_dict(doc: Document, rank: int) -> Dict[str, Any]:
     raw = ""
     try:
-        import json
-
         original = json.loads(doc.metadata.get("original_content") or "{}")
         raw = original.get("raw_text") or ""
     except Exception:
@@ -50,29 +54,152 @@ def _hit_dict(doc: Document, rank: int) -> Dict[str, Any]:
     }
 
 
-def generate_query_variations(question: str, llm) -> Tuple[List[str], int]:
-    """Return [original, ...paraphrases] and elapsed ms."""
-    t0 = time.perf_counter()
-    variations: List[str] = []
-    try:
-        structured = llm.with_structured_output(QueryVariations)
-        prompt = (
-            f"Generate {config.MULTI_QUERY_N} different variations of this query "
-            "that would help retrieve relevant document chunks.\n\n"
-            f"Original query: {question}\n\n"
-            "Return alternative queries that rephrase or approach the same "
-            "question from different angles. Do not repeat the original."
-        )
-        response = structured.invoke(prompt)
-        variations = [
-            q.strip()
-            for q in (response.queries or [])
-            if q and q.strip() and q.strip().lower() != question.strip().lower()
-        ][: config.MULTI_QUERY_N]
-    except Exception as e:
-        logger.warning("Multi-query generation failed, using original only: %s", e)
+def _normalize_variation(text: str, original: str) -> Optional[str]:
+    q = (text or "").strip().strip('"').strip("'").strip("`")
+    q = re.sub(r"\s+", " ", q).strip()
+    if not q or len(q) < 3:
+        return None
+    # Skip section headers / labels from markdown replies
+    lower = q.lower().rstrip(":")
+    if lower in {
+        "alternative queries",
+        "alternatives",
+        "queries",
+        "variations",
+        "query variations",
+        "rephrased queries",
+    }:
+        return None
+    if lower.startswith(("here are", "alternative quer", "the following")):
+        return None
+    if q.lower() == original.strip().lower():
+        return None
+    return q
 
-    queries = [question.strip()] + variations
+
+def _parse_queries_from_text(raw: str, original: str, limit: int) -> List[str]:
+    """Extract query strings from JSON or markdown/plain LLM output."""
+    text = (raw or "").strip()
+    if not text:
+        return []
+
+    # Prefer JSON object/array if present (including fenced blocks)
+    candidates: List[str] = []
+    fence = re.search(r"```(?:json)?\s*([\s\S]*?)```", text, re.IGNORECASE)
+    blob = fence.group(1).strip() if fence else text
+    for snippet in (blob, text):
+        try:
+            data = json.loads(snippet)
+            if isinstance(data, dict) and "queries" in data:
+                candidates = [str(q) for q in (data.get("queries") or [])]
+                break
+            if isinstance(data, list):
+                candidates = [str(q) for q in data]
+                break
+        except Exception:
+            pass
+        match = re.search(r"\{[\s\S]*\"queries\"[\s\S]*\}", snippet)
+        if match:
+            try:
+                data = json.loads(match.group(0))
+                candidates = [str(q) for q in (data.get("queries") or [])]
+                break
+            except Exception:
+                pass
+
+    if not candidates:
+        for line in text.splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            m = _QUERY_LINE_RE.match(line)
+            piece = (m.group(1) if m else line).strip()
+            # Drop trailing markdown emphasis leftovers
+            piece = piece.strip("*").strip("_").strip()
+            if piece:
+                candidates.append(piece)
+
+    out: List[str] = []
+    seen = set()
+    for item in candidates:
+        norm = _normalize_variation(item, original)
+        if not norm:
+            continue
+        key = norm.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(norm)
+        if len(out) >= limit:
+            break
+    return out
+
+
+def _multi_query_prompt(question: str) -> str:
+    n = config.MULTI_QUERY_N
+    return (
+        f"Generate exactly {n} different search-query variations of the user question "
+        "to improve document retrieval.\n\n"
+        f"Original query: {question}\n\n"
+        "Rules:\n"
+        f"- Return ONLY a JSON object: {{\"queries\": [\"...\", \"...\"]}} with exactly {n} strings.\n"
+        "- Each string is a full alternative query (rephrase or different angle).\n"
+        "- Do not repeat the original query.\n"
+        "- No markdown, no commentary, no code fences."
+    )
+
+
+def generate_query_variations(question: str, llm) -> Tuple[List[str], int]:
+    """Return [original, ...paraphrases] and elapsed ms.
+
+    Uses a plain LLM call + robust parsing (JSON or markdown lists). Ollama
+    models often ignore structured-output schemas and return prose/markdown;
+    structured output is only tried if plain parsing yields nothing.
+    """
+    t0 = time.perf_counter()
+    original = question.strip()
+    variations: List[str] = []
+    prompt = _multi_query_prompt(original)
+    raw_preview = ""
+
+    # 1) Plain invoke — reliable with Ollama / gpt-oss style replies
+    try:
+        raw = llm.invoke(prompt)
+        content = getattr(raw, "content", raw)
+        if isinstance(content, list):
+            content = "".join(
+                part.get("text", "") if isinstance(part, dict) else str(part)
+                for part in content
+            )
+        raw_preview = str(content or "")
+        variations = _parse_queries_from_text(
+            raw_preview, original, config.MULTI_QUERY_N
+        )
+    except Exception as e:
+        logger.warning("Multi-query plain invoke failed: %s", e)
+
+    # 2) Structured output fallback (OpenAI-style providers)
+    if not variations:
+        try:
+            structured = llm.with_structured_output(QueryVariations)
+            response = structured.invoke(prompt)
+            variations = _parse_queries_from_text(
+                json.dumps({"queries": list(response.queries or [])}),
+                original,
+                config.MULTI_QUERY_N,
+            )
+        except Exception as e:
+            logger.info("Structured multi-query fallback failed: %s", e)
+
+    if not variations:
+        logger.warning(
+            "Multi-query found no variations; using original only. Raw preview: %s",
+            _preview(raw_preview, 200),
+        )
+    else:
+        logger.info("Multi-query produced %d variation(s)", len(variations))
+
+    queries = [original] + variations
     seen = set()
     unique: List[str] = []
     for q in queries:

@@ -18,11 +18,10 @@ DOCS_DIR = ROOT_DIR / "docs"
 DATA_DIR = ROOT_DIR / "data"
 CHROMA_DIR = Path(os.getenv("CHROMA_DIR", str(DATA_DIR / "chroma_db")))
 DEMO_PDF_PATH = Path(
-    os.getenv("DEMO_PDF_PATH", str(DOCS_DIR / "attention-is-all-you-need.pdf"))
+    os.getenv("DEMO_PDF_PATH", str(DOCS_DIR / "demo_pdf.pdf"))
 )
-DEMO_PDF_URL = os.getenv(
-    "DEMO_PDF_URL", "https://arxiv.org/pdf/1706.03762.pdf"
-)
+# Optional: only used when DEMO_PDF_PATH is missing (e.g. fresh HF Space).
+DEMO_PDF_URL = (os.getenv("DEMO_PDF_URL") or "").strip()
 UPLOAD_DIR = Path(os.getenv("UPLOAD_DIR", str(DATA_DIR / "uploads")))
 
 OLLAMA_API_KEY = os.getenv("OLLAMA_API_KEY") or os.getenv("OPENAI_API_KEY") or ""
@@ -92,10 +91,19 @@ def ensure_dirs() -> None:
 
 
 def ensure_demo_pdf() -> Path:
-    """Return local demo PDF path, downloading from arXiv if missing."""
+    """Return local demo PDF path (`docs/demo_pdf.pdf` by default).
+
+    Downloads only when the file is missing and ``DEMO_PDF_URL`` is set.
+    """
     ensure_dirs()
     if DEMO_PDF_PATH.exists() and DEMO_PDF_PATH.stat().st_size > 1000:
         return DEMO_PDF_PATH
+
+    if not DEMO_PDF_URL:
+        raise RuntimeError(
+            f"Demo PDF not found at {DEMO_PDF_PATH}. "
+            "Place docs/demo_pdf.pdf there, or set DEMO_PDF_URL to download it."
+        )
 
     logger.info("Downloading demo PDF from %s", DEMO_PDF_URL)
     request = Request(
@@ -106,6 +114,7 @@ def ensure_demo_pdf() -> Path:
         data = response.read()
     if len(data) < 1000 or not data.startswith(b"%PDF"):
         raise RuntimeError("Downloaded demo file does not look like a valid PDF.")
+    DEMO_PDF_PATH.parent.mkdir(parents=True, exist_ok=True)
     DEMO_PDF_PATH.write_bytes(data)
     logger.info("Saved demo PDF to %s (%s bytes)", DEMO_PDF_PATH, len(data))
     return DEMO_PDF_PATH

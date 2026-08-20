@@ -28,7 +28,7 @@ dbv1/
 dbv2/
 _extract_funcs.py
 
-# Large binaries — downloaded at runtime for HF Spaces
+# Large binaries — keep local only (HF Spaces rejects PDF in plain git)
 docs/*.pdf
 
 # OS / IDE files
@@ -36,3 +36,8 @@ docs/*.pdf
 Thumbs.db
 .vscode/
 .idea/
+
+final_demo.md
+presentation.md
+presentationv2.md
+ttspresentation.md

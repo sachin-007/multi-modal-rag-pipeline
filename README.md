@@ -19,7 +19,7 @@ This is **enterprise-shaped retrieval** (hybrid + RRF + rerank + traces), not fu
 
 Figures are extracted and stored in chunk metadata; answers use **text + tables only** because the default Cloud chat model (`gpt-oss:120b`) is text-only.
 
-The demo paper (*Attention Is All You Need*) is **downloaded automatically** on first use (not stored in Git).
+The one-click demo uses `docs/demo_pdf.pdf` (local file). Optional `DEMO_PDF_URL` downloads it only if that path is missing.
 
 ## Features
 
